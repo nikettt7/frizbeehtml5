@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dog Park Adventure</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+        #instructions {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            font-family: Arial, sans-serif;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 24px;
+            font-family: Arial, sans-serif;
+        }
+        #score {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            font-family: Arial, sans-serif;
+            font-size: 20px;
+        }
+        .score-popup {
+            position: absolute;
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px #000000;
+            animation: floatUp 1s forwards;
+        }
+        @keyframes floatUp {
+            0% { transform: translateY(0); opacity: 1; }
+            100% { transform: translateY(-50px); opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div id="instructions">
+        W: Move Forward | S: Move Backward | A/D: Turn Left/Right | SPACE: Jump | Right Mouse Button: Look Around
+    </div>
+    <div id="score">Score: 0</div>
+    <div id="loading">Loading...</div>
+    <audio id="backgroundMusic" loop>
+        <source src="https://assets.mixkit.co/music/preview/mixkit-relaxing-guitar-melody-1234.mp3" type="audio/mpeg">
+    </audio>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+    <script>
+        // Scene setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 10, 15);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Game state
+        let score = 0;
+        const scoreElement = document.getElementById('score');
+        let gameLoaded = false;
+        const loadingText = document.getElementById('loading');
+        const parkBoundary = new THREE.Box3(
+            new THREE.Vector3(-50, -1, -50),
+            new THREE.Vector3(50, 20, 50)
+        );
+        
+        // Objects collections
+        const obstacles = [];
+        const collisionObjects = [];
+        const npcs = [];
+        const projectiles = [];
+        let dog;
+
+        // Audio setup
+        const bgMusic = document.getElementById('backgroundMusic');
+        bgMusic.volume = 0.3;
+        
+        function enableMusic() {
+            bgMusic.play().catch(e => console.log("Audio play failed:", e));
+            document.removeEventListener('click', enableMusic);
+        }
+        document.addEventListener('click', enableMusic);
+
+        // NPC color palette (excluding pink)
+        const npcColors = [
+            0x4682B4, 0x32CD32, 0xFF6347, 0x9370DB, 
+            0xFFD700, 0x40E0D0, 0x7CFC00, 0x00FFFF
+        ];
+
+        // Camera orbit controls
+        let isRightMouseDown = false;
+        let previousMouseX = 0;
+        let previousMouseY = 0;
+        let cameraAngleX = 0;
+        let cameraAngleY = 0;
+        const cameraDistance = 15;
+        const cameraHeight = 5;
+        
+        function updateCameraPosition() {
+            const offset = new THREE.Vector3(0, cameraHeight, -cameraDistance);
+            offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraAngleX);
+            const verticalAxis = new THREE.Vector3(
+                Math.sin(cameraAngleX),
+                0,
+                Math.cos(cameraAngleX)
+            );
+            offset.applyAxisAngle(verticalAxis, cameraAngleY);
+            camera.position.copy(dog.position).add(offset);
+            camera.lookAt(dog.position);
+        }
+        
+        // Mouse event handlers
+        renderer.domElement.addEventListener('mousedown', (event) => {
+            if (event.button === 2) {
+                isRightMouseDown = true;
+                previousMouseX = event.clientX;
+                previousMouseY = event.clientY;
+                renderer.domElement.style.cursor = 'grabbing';
+            }
+        });
+        
+        renderer.domElement.addEventListener('mouseup', (event) => {
+            if (event.button === 2) {
+                isRightMouseDown = false;
+                renderer.domElement.style.cursor = 'grab';
+            }
+        });
+        
+        renderer.domElement.addEventListener('mousemove', (event) => {
+            if (isRightMouseDown && gameLoaded) {
+                const deltaX = event.clientX - previousMouseX;
+                const deltaY = event.clientY - previousMouseY;
+                cameraAngleX -= deltaX * 0.005;
+                cameraAngleY = Math.max(-Math.PI/3, Math.min(Math.PI/3, cameraAngleY - deltaY * 0.005));
+                updateCameraPosition();
+                previousMouseX = event.clientX;
+                previousMouseY = event.clientY;
+            }
+        });
+        
+        renderer.domElement.addEventListener('contextmenu', (event) => event.preventDefault());
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(10, 20, 10);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        scene.add(directionalLight);
+
+        // Ground
+        const groundGeometry = new THREE.PlaneGeometry(100, 100);
+        const groundMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x4CAF50, 
+            side: THREE.DoubleSide 
+        });
+        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+        ground.rotation.x = -Math.PI / 2;
+        ground.receiveShadow = true;
+        scene.add(ground);
+
+        // Environment creation functions
+        function createTree(x, z) {
+            const trunkGeometry = new THREE.CylinderGeometry(0.3, 0.4, 2, 8);
+            const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+            const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+            trunk.position.set(x, 1, z);
+            trunk.castShadow = true;
+            trunk.receiveShadow = true;
+            
+            const leavesGeometry = new THREE.SphereGeometry(2, 8, 8);
+            const leavesMaterial = new THREE.MeshStandardMaterial({ color: 0x228B22 });
+            const leaves = new THREE.Mesh(leavesGeometry, leavesMaterial);
+            leaves.position.set(x, 3.5, z);
+            leaves.castShadow = true;
+            leaves.receiveShadow = true;
+            
+            scene.add(trunk, leaves);
+            
+            const treeBox = new THREE.Box3().setFromObject(trunk);
+            treeBox.expandByScalar(1.5);
+            obstacles.push(treeBox);
+            collisionObjects.push(trunk);
+            
+            return { trunk, leaves };
+        }
+        
+        function createBush(x, z) {
+            const bushGeometry = new THREE.SphereGeometry(1.2, 8, 8);
+            const bushMaterial = new THREE.MeshStandardMaterial({ color: 0x2E8B57 });
+            const bush = new THREE.Mesh(bushGeometry, bushMaterial);
+            bush.position.set(x, 1, z);
+            bush.castShadow = true;
+            bush.receiveShadow = true;
+            
+            scene.add(bush);
+            
+            const bushBox = new THREE.Box3().setFromObject(bush);
+            obstacles.push(bushBox);
+            collisionObjects.push(bush);
+            
+            return bush;
+        }
+        
+        function createFlower(x, z) {
+            const group = new THREE.Group();
+            
+            const stemGeometry = new THREE.CylinderGeometry(0.05, 0.05, 0.8, 8);
+            const stemMaterial = new THREE.MeshStandardMaterial({ color: 0x00AA00 });
+            const stem = new THREE.Mesh(stemGeometry, stemMaterial);
+            stem.position.set(x, 0.4, z);
+            group.add(stem);
+            
+            const flowerGeometry = new THREE.SphereGeometry(0.3, 8, 8);
+            const flowerMaterial = new THREE.MeshStandardMaterial({ color: 0xFF69B4 }); // Pink flowers
+            const flower = new THREE.Mesh(flowerGeometry, flowerMaterial);
+            flower.position.set(x, 0.8, z);
+            group.add(flower);
+            
+            scene.add(group);
+            return group;
+        }
+
+        // Check if position is valid (10 units from any object)
+        function isValidPosition(x, z, objects, minDistance = 10) {
+            const testPos = new THREE.Vector3(x, 0, z);
+            for (const obj of objects) {
+                if (obj.position.distanceTo(testPos) < minDistance) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Generate environment first
+        function generateEnvironment() {
+            // Trees
+            for (let i = 0; i < 20; i++) {
+                let x, z, attempts = 0;
+                do {
+                    x = Math.random() * 80 - 40;
+                    z = Math.random() * 80 - 40;
+                    attempts++;
+                } while ((!isValidPosition(x, z, []) || Math.sqrt(x*x + z*z) < 15) && attempts < 50);
+                
+                if (attempts < 50) createTree(x, z);
+            }
+            
+            // Bushes
+            for (let i = 0; i < 30; i++) {
+                let x, z, attempts = 0;
+                do {
+                    x = Math.random() * 80 - 40;
+                    z = Math.random() * 80 - 40;
+                    attempts++;
+                } while ((!isValidPosition(x, z, []) || Math.sqrt(x*x + z*z) < 15) && attempts < 50);
+                
+                if (attempts < 50) createBush(x, z);
+            }
+            
+            // Flowers (all pink)
+            for (let i = 0; i < 20; i++) {
+                let x, z, attempts = 0;
+                do {
+                    x = Math.random() * 80 - 40;
+                    z = Math.random() * 80 - 40;
+                    attempts++;
+                } while ((!isValidPosition(x, z, []) || Math.sqrt(x*x + z*z) < 15) && attempts < 50);
+                
+                if (attempts < 50) createFlower(x, z);
+            }
+        }
+
+        // NPC implementation
+        function createNPC(x, z, color) {
+            const npcGroup = new THREE.Group();
+            const npcColor = color || npcColors[Math.floor(Math.random() * npcColors.length)];
+            
+            // All parts same color
+            const headGeometry = new THREE.SphereGeometry(0.4, 8, 8);
+            const headMaterial = new THREE.MeshStandardMaterial({ color: npcColor });
+            const head = new THREE.Mesh(headGeometry, headMaterial);
+            head.position.set(0, 1.9, 0);
+            npcGroup.add(head);
+            
+            const torsoGeometry = new THREE.BoxGeometry(0.7, 0.9, 0.4);
+            const torsoMaterial = new THREE.MeshStandardMaterial({ color: npcColor });
+            const torso = new THREE.Mesh(torsoGeometry, torsoMaterial);
+            torso.position.set(0, 1.1, 0);
+            npcGroup.add(torso);
+            
+            const legGeometry = new THREE.BoxGeometry(0.25, 0.8, 0.25);
+            const legMaterial = new THREE.MeshStandardMaterial({ color: npcColor });
+            
+            const leftLeg = new THREE.Mesh(legGeometry, legMaterial);
+            leftLeg.position.set(-0.2, 0.4, 0);
+            npcGroup.add(leftLeg);
+            
+            const rightLeg = new THREE.Mesh(legGeometry, legMaterial);
+            rightLeg.position.set(0.2, 0.4, 0);
+            npcGroup.add(rightLeg);
+            
+            npcGroup.position.set(x, 0, z);
+            npcGroup.castShadow = true;
+            npcGroup.userData.isNPC = true;
+            npcGroup.userData.color = npcColor;
+            npcGroup.userData.activeProjectiles = 0; // Track active projectiles
+            npcGroup.userData.maxProjectiles = 1 + Math.floor(Math.random() * 2); // 1 or 2 max projectiles
+            
+            scene.add(npcGroup);
+            
+            // NPC properties
+            npcGroup.speed = 0.02 + Math.random() * 0.02;
+            npcGroup.shootCooldown = 3000 + Math.random() * 2000; // 3-5 seconds
+            npcGroup.targetPosition = new THREE.Vector3();
+            
+            npcGroup.findNewTarget = function() {
+                for (let attempts = 0; attempts < 20; attempts++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const distance = 5 + Math.random() * 10;
+                    
+                    const newTarget = new THREE.Vector3(
+                        this.position.x + Math.sin(angle) * distance,
+                        0,
+                        this.position.z + Math.cos(angle) * distance
+                    );
+                    
+                    // Check park boundaries
+                    const targetBox = new THREE.Box3().setFromCenterAndSize(newTarget, new THREE.Vector3(1, 1, 1));
+                    if (!parkBoundary.containsBox(targetBox)) continue;
+                    
+                    // Check path with raycasting (excluding NPCs and dog)
+                    const direction = new THREE.Vector3().subVectors(newTarget, this.position).normalize();
+                    const ray = new THREE.Raycaster(this.position, direction, 0, distance);
+                    const intersects = ray.intersectObjects(collisionObjects);
+                    
+                    let pathClear = true;
+                    for (const intersect of intersects) {
+                        if (intersect.distance < distance) {
+                            pathClear = false;
+                            break;
+                        }
+                    }
+                    
+                    if (pathClear) {
+                        this.targetPosition.copy(newTarget);
+                        return true;
+                    }
+                }
+                return false;
+            };
+            
+            // Initialize first target
+            npcGroup.findNewTarget();
+            
+            // Add collision box
+            npcGroup.collisionBox = new THREE.Box3().setFromObject(npcGroup);
+            npcGroup.collisionBox.expandByScalar(0.5);
+            
+            return npcGroup;
+        }
+
+        // Dog character
+        function createDog() {
+            const dogGroup = new THREE.Group();
+            const scale = 0.7;
+            dogGroup.scale.set(scale, scale, scale);
+            
+            // Body parts
+            const bodyGeometry = new THREE.BoxGeometry(1.5, 0.8, 0.8);
+            const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xA0522D });
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            body.position.y = 0.8;
+            body.castShadow = true;
+            
+            const headGeometry = new THREE.SphereGeometry(0.5, 8, 8);
+            const headMaterial = new THREE.MeshStandardMaterial({ color: 0xA0522D });
+            const head = new THREE.Mesh(headGeometry, headMaterial);
+            head.position.set(0, 1.0, 0.8);
+            dogGroup.add(head);
+            
+            const legGeometry = new THREE.CylinderGeometry(0.1, 0.1, 0.5, 8);
+            const legMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+            
+            const legs = [
+                [-0.4, 0.25, 0.4],
+                [0.4, 0.25, 0.4],
+                [-0.4, 0.25, -0.4],
+                [0.4, 0.25, -0.4]
+            ].forEach(pos => {
+                const leg = new THREE.Mesh(legGeometry, legMaterial);
+                leg.position.set(...pos);
+                leg.rotation.x = Math.PI / 2;
+                leg.castShadow = true;
+                dogGroup.add(leg);
+            });
+            
+            const tailGeometry = new THREE.CylinderGeometry(0.05, 0.1, 0.6, 8);
+            const tail = new THREE.Mesh(tailGeometry, legMaterial);
+            tail.position.set(-0.8, 0.8, -0.4);
+            tail.rotation.z = Math.PI / 4;
+            tail.castShadow = true;
+            
+            dogGroup.add(body, head, tail);
+            dogGroup.position.set(0, 0, 0);
+            dogGroup.castShadow = true;
+            dogGroup.userData.isDog = true;
+            scene.add(dogGroup);
+            
+            // Dog properties (reduced speed by 50%)
+            dogGroup.speed = 0;
+            dogGroup.maxSpeed = 0.1;
+            dogGroup.acceleration = 0.02;
+            dogGroup.deceleration = 0.05;
+            dogGroup.rotationSpeed = 0.05;
+            dogGroup.direction = new THREE.Vector3(0, 0, 1);
+            dogGroup.velocity = new THREE.Vector3();
+            dogGroup.isJumping = false;
+            dogGroup.jumpHeight = 0;
+            dogGroup.jumpVelocity = 0;
+            dogGroup.collisionBox = new THREE.Box3().setFromObject(dogGroup);
+            
+            return dogGroup;
+        }
+
+        // Spawn NPCs with proper spacing
+        function spawnNPCs() {
+            const allObjects = [...collisionObjects];
+            
+            for (let i = 0; i < 8; i++) {
+                let x, z, attempts = 0;
+                do {
+                    x = Math.random() * 60 - 30;
+                    z = Math.random() * 60 - 30;
+                    attempts++;
+                } while ((!isValidPosition(x, z, allObjects) || Math.sqrt(x*x + z*z) < 15) && attempts < 100);
+                
+                if (attempts < 100) {
+                    const npc = createNPC(x, z, npcColors[i % npcColors.length]);
+                    npcs.push(npc);
+                    allObjects.push(npc);
+                }
+            }
+        }
+
+        // Spawn dog after NPCs
+        function spawnDog() {
+            const allObjects = [...collisionObjects, ...npcs];
+            let x = 0, z = 0, attempts = 0;
+            
+            do {
+                x = Math.random() * 20 - 10;
+                z = Math.random() * 20 - 10;
+                attempts++;
+            } while (!isValidPosition(x, z, allObjects) && attempts < 50);
+            
+            dog = createDog();
+            dog.position.set(x, 0, z);
+            
+            // Game is ready
+            gameLoaded = true;
+            loadingText.style.display = 'none';
+        }
+
+        // Initialize game in sequence
+        function initGame() {
+            generateEnvironment();
+            setTimeout(() => {
+                spawnNPCs();
+                spawnDog();
+            }, 1000);
+        }
+
+        // Collision detection (excluding NPCs and dog)
+        function checkCollision(objectBox) {
+            if (!parkBoundary.containsBox(objectBox)) return true;
+            for (const obstacle of obstacles) {
+                if (obstacle.intersectsBox(objectBox)) return true;
+            }
+            return false;
+        }
+
+        // Create paper wrapper projectile
+        function createPaperWrapper(position, direction, color, npc) {
+            const geometry = new THREE.SphereGeometry(0.3, 4, 4);
+            geometry.vertices.forEach(v => {
+                v.x += (Math.random() - 0.5) * 0.1;
+                v.y += (Math.random() - 0.5) * 0.1;
+                v.z += (Math.random() - 0.5) * 0.1;
+            });
+            
+            const material = new THREE.MeshStandardMaterial({ 
+                color: color,
+                roughness: 0.8,
+                metalness: 0.1
+            });
+            
+            const wrapper = new THREE.Mesh(geometry, material);
+            wrapper.position.copy(position);
+            
+            // Parabolic motion properties
+            wrapper.velocity = direction.clone().normalize().multiplyScalar(0.1);
+            wrapper.velocity.y = 0.2;
+            wrapper.gravity = -0.02;
+            wrapper.stuck = false;
+            wrapper.collected = false;
+            wrapper.rotation.set(
+                Math.random() * Math.PI * 2,
+                Math.random() * Math.PI * 2,
+                Math.random() * Math.PI * 2
+            );
+            wrapper.rotationSpeed = new THREE.Vector3(
+                (Math.random() - 0.5) * 0.05,
+                (Math.random() - 0.5) * 0.05,
+                (Math.random() - 0.5) * 0.05
+            );
+            wrapper.userData.owner = npc; // Track which NPC threw this
+            
+            scene.add(wrapper);
+            projectiles.push(wrapper);
+            npc.userData.activeProjectiles++;
+            return wrapper;
+        }
+
+        // Show score popup at position
+        function showScorePopup(score, position) {
+            const popup = document.createElement('div');
+            popup.className = 'score-popup';
+            popup.textContent = `+${score}`;
+            
+            const vector = position.clone().project(camera);
+            vector.x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+            vector.y = (-(vector.y * 0.5) + 0.5) * window.innerHeight;
+            
+            popup.style.left = `${vector.x}px`;
+            popup.style.top = `${vector.y}px`;
+            document.body.appendChild(popup);
+            
+            setTimeout(() => {
+                popup.remove();
+            }, 1000);
+        }
+
+        // Check for projectile collection
+        function checkProjectileCollection() {
+            const dogBox = dog.collisionBox;
+            
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const p = projectiles[i];
+                const pBox = new THREE.Box3().setFromObject(p);
+                
+                if (dogBox.intersectsBox(pBox) && !p.collected) {
+                    p.collected = true;
+                    scene.remove(p);
+                    
+                    // Decrement count on owner NPC
+                    if (p.userData.owner) {
+                        p.userData.owner.userData.activeProjectiles--;
+                    }
+                    
+                    projectiles.splice(i, 1);
+                    
+                    const points = p.stuck ? 1 : 2;
+                    score += points;
+                    scoreElement.textContent = `Score: ${score}`;
+                    showScorePopup(points, p.position);
+                }
+            }
+        }
+
+        // Input handling
+        const keys = {
+            w: false, a: false, s: false, d: false, ' ': false
+        };
+        
+        window.addEventListener('keydown', (event) => {
+            if (!gameLoaded) return;
+            const key = event.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) keys[key] = true;
+        });
+        
+        window.addEventListener('keyup', (event) => {
+            if (!gameLoaded) return;
+            const key = event.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) keys[key] = false;
+        });
+
+        // Animation loop
+        let lastTime = 0;
+        function animate(time) {
+            requestAnimationFrame(animate);
+            const deltaTime = time - lastTime;
+            lastTime = time;
+            
+            if (!gameLoaded) return;
+            
+            // Dog movement
+            if (keys.w) dog.speed = Math.min(dog.speed + dog.acceleration, dog.maxSpeed);
+            else if (keys.s) dog.speed = Math.max(dog.speed - dog.acceleration, -dog.maxSpeed * 0.5);
+            else {
+                if (dog.speed > 0) dog.speed = Math.max(dog.speed - dog.deceleration, 0);
+                else if (dog.speed < 0) dog.speed = Math.min(dog.speed + dog.deceleration, 0);
+            }
+            
+            if (keys.a) {
+                dog.rotation.y += dog.rotationSpeed;
+                dog.direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), dog.rotationSpeed);
+            }
+            if (keys.d) {
+                dog.rotation.y -= dog.rotationSpeed;
+                dog.direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), -dog.rotationSpeed);
+            }
+            
+            // Jumping with increased height and gravity
+            if (keys[' '] && !dog.isJumping) {
+                dog.isJumping = true;
+                dog.jumpVelocity = 0.25;
+            }
+            
+            if (dog.isJumping) {
+                dog.jumpVelocity -= 0.02;
+                dog.jumpHeight += dog.jumpVelocity;
+                if (dog.jumpHeight <= 0) {
+                    dog.jumpHeight = 0;
+                    dog.isJumping = false;
+                    dog.jumpVelocity = 0;
+                }
+            }
+            
+            dog.velocity.copy(dog.direction).multiplyScalar(dog.speed);
+            const oldPosition = dog.position.clone();
+            dog.position.add(dog.velocity);
+            dog.position.y = dog.jumpHeight;
+            dog.collisionBox.setFromObject(dog);
+            
+            if (checkCollision(dog.collisionBox)) {
+                dog.position.copy(oldPosition);
+                dog.speed = 0;
+                dog.collisionBox.setFromObject(dog);
+            }
+            
+            // NPC movement and behavior
+            for (const npc of npcs) {
+                npc.collisionBox.setFromObject(npc);
+                
+                if (npc.targetPosition) {
+                    const direction = new THREE.Vector3().subVectors(npc.targetPosition, npc.position).normalize();
+                    const distance = npc.position.distanceTo(npc.targetPosition);
+                    
+                    if (distance > 0.5) {
+                        const oldPos = npc.position.clone();
+                        npc.position.add(direction.multiplyScalar(Math.min(npc.speed, distance)));
+                        npc.rotation.y = Math.atan2(-direction.x, -direction.z);
+                        
+                        if (checkCollision(npc.collisionBox)) {
+                            npc.position.copy(oldPos);
+                            npc.findNewTarget();
+                        }
+                    } else {
+                        npc.findNewTarget();
+                    }
+                }
+                
+                // Shooting logic - only if below max projectiles
+                npc.shootCooldown -= deltaTime;
+                if (npc.shootCooldown <= 0 && npc.userData.activeProjectiles < npc.userData.maxProjectiles) {
+                    const toDog = new THREE.Vector3().subVectors(dog.position, npc.position).normalize();
+                    createPaperWrapper(
+                        npc.position.clone().add(new THREE.Vector3(0, 1.5, 0)), 
+                        toDog, 
+                        npc.userData.color,
+                        npc
+                    );
+                    npc.shootCooldown = 3000 + Math.random() * 2000; // 3-5 seconds
+                }
+            }
+            
+            // Update paper wrappers with parabolic motion
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const p = projectiles[i];
+                
+                if (!p.stuck) {
+                    p.velocity.y += p.gravity;
+                    p.position.x += p.velocity.x;
+                    p.position.y += p.velocity.y;
+                    p.position.z += p.velocity.z;
+                    
+                    p.rotation.x += p.rotationSpeed.x;
+                    p.rotation.y += p.rotationSpeed.y;
+                    p.rotation.z += p.rotationSpeed.z;
+                    
+                    if (p.position.y <= 0.2) {
+                        p.position.y = 0.2;
+                        p.stuck = true;
+                    }
+                }
+            }
+            
+            checkProjectileCollection();
+            updateCameraPosition();
+            renderer.render(scene, camera);
+        }
+        
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        initGame();
+        animate();
+    </script>
+</body>
+</html>
