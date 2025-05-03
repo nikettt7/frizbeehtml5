@@ -1,0 +1,1087 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dog Park Adventure</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+        #instructions {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            font-family: Arial, sans-serif;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 24px;
+            font-family: Arial, sans-serif;
+        }
+        #score-container {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            font-family: Arial, sans-serif;
+        }
+        #score {
+            font-size: 20px;
+            margin-bottom: 5px;
+        }
+        #with-dog {
+            font-size: 16px;
+            margin-bottom: 5px;
+        }
+        #color-counts {
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        .score-popup {
+            position: absolute;
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px #000000;
+            animation: floatUp 1s forwards;
+        }
+        @keyframes floatUp {
+            0% { transform: translateY(0); opacity: 1; }
+            100% { transform: translateY(-50px); opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div id="instructions">
+        W: Move Forward | S: Move Backward | A/D: Turn Left/Right | SPACE: Jump | Right Mouse Button: Look Around | E: Return Items
+    </div>
+    <div id="score-container">
+        <div id="score">Score: 0</div>
+        <div id="with-dog">With Dog: 0/5</div>
+        <div id="color-counts">Carrying: None</div>
+    </div>
+    <div id="loading">Loading...</div>
+    <audio id="backgroundMusic" loop>
+        <source src="https://assets.mixkit.co/music/preview/mixkit-relaxing-guitar-melody-1234.mp3" type="audio/mpeg">
+    </audio>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+    <script>
+        // Scene setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 10, 15);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Game state
+        let score = 0;
+        let withDogCount = 0;
+        const maxWithDog = 5;
+        const colorCounts = {};
+        const scoreElement = document.getElementById('score');
+        const withDogElement = document.getElementById('with-dog');
+        const colorCountsElement = document.getElementById('color-counts');
+        let gameLoaded = false;
+        const loadingText = document.getElementById('loading');
+        const parkRadius = 60; // Increased park size
+        const parkBoundary = new THREE.Box3(
+            new THREE.Vector3(-parkRadius, -1, -parkRadius),
+            new THREE.Vector3(parkRadius, 20, parkRadius)
+        );
+        
+        // Objects collections
+        const obstacles = [];
+        const collisionObjects = [];
+        const npcs = [];
+        const projectiles = [];
+        const carriedProjectiles = [];
+        const flowerPatches = [];
+        const dustbins = [];
+        let dog;
+        let minNPCs = 3;
+        let maxNPCs = 10;
+        let currentNPCs = 5;
+
+        // Initialize color counts
+        const npcColors = [
+            0x4682B4, 0x32CD32, 0xFF6347, 0x9370DB, 
+            0xFFD700, 0x40E0D0, 0x7CFC00, 0x00FFFF
+        ];
+        
+        npcColors.forEach(color => {
+            colorCounts[color] = 0;
+        });
+
+        // Update color counts display with better formatting
+        function updateColorCounts() {
+            let text = "Carrying:<br>";
+            let hasItems = false;
+            
+            for (const color in colorCounts) {
+                if (colorCounts[color] > 0) {
+                    text += `<span style="color: #${color.toString(16).padStart(6, '0')}">● ${colorCounts[color]}</span><br>`;
+                    hasItems = true;
+                }
+            }
+            
+            if (!hasItems) text += "None";
+            colorCountsElement.innerHTML = text;
+        }
+
+        // Audio setup
+        const bgMusic = document.getElementById('backgroundMusic');
+        bgMusic.volume = 0.3;
+        
+        function enableMusic() {
+            bgMusic.play().catch(e => console.log("Audio play failed:", e));
+            document.removeEventListener('click', enableMusic);
+        }
+        document.addEventListener('click', enableMusic);
+
+        // Camera orbit controls
+        let isRightMouseDown = false;
+        let previousMouseX = 0;
+        let previousMouseY = 0;
+        let cameraAngleX = 0;
+        let cameraAngleY = 0;
+        const cameraDistance = 15;
+        const cameraHeight = 5;
+        
+        function updateCameraPosition() {
+            const offset = new THREE.Vector3(0, cameraHeight, -cameraDistance);
+            offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraAngleX);
+            const verticalAxis = new THREE.Vector3(
+                Math.sin(cameraAngleX),
+                0,
+                Math.cos(cameraAngleX)
+            );
+            offset.applyAxisAngle(verticalAxis, cameraAngleY);
+            camera.position.copy(dog.position).add(offset);
+            camera.lookAt(dog.position);
+        }
+        
+        // Mouse event handlers
+        renderer.domElement.addEventListener('mousedown', (event) => {
+            if (event.button === 2) {
+                isRightMouseDown = true;
+                previousMouseX = event.clientX;
+                previousMouseY = event.clientY;
+                renderer.domElement.style.cursor = 'grabbing';
+            }
+        });
+        
+        renderer.domElement.addEventListener('mouseup', (event) => {
+            if (event.button === 2) {
+                isRightMouseDown = false;
+                renderer.domElement.style.cursor = 'grab';
+            }
+        });
+        
+        renderer.domElement.addEventListener('mousemove', (event) => {
+            if (isRightMouseDown && gameLoaded) {
+                const deltaX = event.clientX - previousMouseX;
+                const deltaY = event.clientY - previousMouseY;
+                cameraAngleX -= deltaX * 0.005;
+                cameraAngleY = Math.max(-Math.PI/3, Math.min(Math.PI/3, cameraAngleY - deltaY * 0.005));
+                updateCameraPosition();
+                previousMouseX = event.clientX;
+                previousMouseY = event.clientY;
+            }
+        });
+        
+        renderer.domElement.addEventListener('contextmenu', (event) => event.preventDefault());
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        scene.add(ambientLight);
+        
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(10, 20, 10);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        scene.add(directionalLight);
+
+        // Create circular ground with walking tracks
+        function createPark() {
+            // Main ground
+            const groundGeometry = new THREE.CircleGeometry(parkRadius, 64);
+            const groundMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x4CAF50,
+                side: THREE.DoubleSide
+            });
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+            
+            // Outer walking track
+            const outerTrackGeometry = new THREE.RingGeometry(parkRadius - 5, parkRadius, 64);
+            const outerTrackMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x8B4513,
+                side: THREE.DoubleSide
+            });
+            const outerTrack = new THREE.Mesh(outerTrackGeometry, outerTrackMaterial);
+            outerTrack.rotation.x = -Math.PI / 2;
+            outerTrack.receiveShadow = true;
+            scene.add(outerTrack);
+            
+            // + shaped walking track
+            const trackWidth = 3;
+            const trackLength = parkRadius * 1.8;
+            
+            // Horizontal track
+            const horizontalTrackGeometry = new THREE.PlaneGeometry(trackLength, trackWidth);
+            const horizontalTrackMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+            const horizontalTrack = new THREE.Mesh(horizontalTrackGeometry, horizontalTrackMaterial);
+            horizontalTrack.rotation.x = -Math.PI / 2;
+            horizontalTrack.position.y = 0.01; // Slightly above ground
+            scene.add(horizontalTrack);
+            
+            // Vertical track
+            const verticalTrackGeometry = new THREE.PlaneGeometry(trackWidth, trackLength);
+            const verticalTrackMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+            const verticalTrack = new THREE.Mesh(verticalTrackGeometry, verticalTrackMaterial);
+            verticalTrack.rotation.x = -Math.PI / 2;
+            verticalTrack.position.y = 0.01;
+            scene.add(verticalTrack);
+            
+            // Inner circle (center)
+            const innerCircleRadius = 10;
+            const innerCircleGeometry = new THREE.CircleGeometry(innerCircleRadius, 64);
+            const innerCircleMaterial = new THREE.MeshStandardMaterial({ 
+                color: 0x8B4513,
+                side: THREE.DoubleSide
+            });
+            const innerCircle = new THREE.Mesh(innerCircleGeometry, innerCircleMaterial);
+            innerCircle.rotation.x = -Math.PI / 2;
+            innerCircle.position.y = 0.01;
+            scene.add(innerCircle);
+            
+            // Fountain in center
+            const fountainBaseGeometry = new THREE.CylinderGeometry(3, 4, 0.5, 32);
+            const fountainBaseMaterial = new THREE.MeshStandardMaterial({ color: 0xAAAAAA });
+            const fountainBase = new THREE.Mesh(fountainBaseGeometry, fountainBaseMaterial);
+            fountainBase.position.set(0, 0.25, 0);
+            fountainBase.castShadow = true;
+            fountainBase.receiveShadow = true;
+            
+            const fountainPillarGeometry = new THREE.CylinderGeometry(1, 1, 3, 32);
+            const fountainPillarMaterial = new THREE.MeshStandardMaterial({ color: 0xDDDDDD });
+            const fountainPillar = new THREE.Mesh(fountainPillarGeometry, fountainPillarMaterial);
+            fountainPillar.position.set(0, 2, 0);
+            
+            const fountainTopGeometry = new THREE.CylinderGeometry(2, 0, 1, 32);
+            const fountainTopMaterial = new THREE.MeshStandardMaterial({ color: 0xCCCCCC });
+            const fountainTop = new THREE.Mesh(fountainTopGeometry, fountainTopMaterial);
+            fountainTop.position.set(0, 3.5, 0);
+            
+            const fountain = new THREE.Group();
+            fountain.add(fountainBase, fountainPillar, fountainTop);
+            scene.add(fountain);
+            
+            // Add collision for fountain
+            const fountainCollision = new THREE.Box3().setFromObject(fountain);
+            obstacles.push(fountainCollision);
+            collisionObjects.push(fountain);
+        }
+
+        // Create flower patches (5x dog length size)
+        function createFlowerPatches() {
+            const patchSize = 3.5; // 5x dog length (dog is ~0.7 units long)
+            const patchesCount = 8;
+            
+            for (let i = 0; i < patchesCount; i++) {
+                let x, z, attempts = 0;
+                const angle = (i / patchesCount) * Math.PI * 2;
+                const distance = parkRadius * 0.6 * (0.7 + Math.random() * 0.3);
+                
+                x = Math.cos(angle) * distance;
+                z = Math.sin(angle) * distance;
+                
+                // Create patch base
+                const patchGeometry = new THREE.PlaneGeometry(patchSize, patchSize);
+                const patchMaterial = new THREE.MeshStandardMaterial({ 
+                    color: 0x2E8B57,
+                    side: THREE.DoubleSide
+                });
+                const patch = new THREE.Mesh(patchGeometry, patchMaterial);
+                patch.rotation.x = -Math.PI / 2;
+                patch.position.set(x, 0.01, z);
+                scene.add(patch);
+                
+                // Add collision for patch
+                const patchBox = new THREE.Box3().setFromObject(patch);
+                patchBox.expandByScalar(0.5);
+                obstacles.push(patchBox);
+                collisionObjects.push(patch);
+                flowerPatches.push(patch);
+                
+                // Add flowers to patch
+                const flowersCount = 5 + Math.floor(Math.random() * 10);
+                const group = new THREE.Group();
+                
+                for (let j = 0; j < flowersCount; j++) {
+                    const flowerX = (Math.random() - 0.5) * patchSize * 0.8;
+                    const flowerZ = (Math.random() - 0.5) * patchSize * 0.8;
+                    
+                    const stemGeometry = new THREE.CylinderGeometry(0.05, 0.05, 0.8, 8);
+                    const stemMaterial = new THREE.MeshStandardMaterial({ color: 0x00AA00 });
+                    const stem = new THREE.Mesh(stemGeometry, stemMaterial);
+                    stem.position.set(flowerX, 0.4, flowerZ);
+                    group.add(stem);
+                    
+                    const flowerGeometry = new THREE.SphereGeometry(0.3, 8, 8);
+                    const flowerMaterial = new THREE.MeshStandardMaterial({ color: 0xFF69B4 });
+                    const flower = new THREE.Mesh(flowerGeometry, flowerMaterial);
+                    flower.position.set(flowerX, 0.8, flowerZ);
+                    group.add(flower);
+                }
+                
+                group.position.set(x, 0, z);
+                scene.add(group);
+            }
+        }
+
+        // Create dustbins
+        function createDustbins() {
+            const dustbinCount = 4;
+            
+            for (let i = 0; i < dustbinCount; i++) {
+                const angle = (i / dustbinCount) * Math.PI * 2;
+                const distance = parkRadius * 0.7;
+                
+                const x = Math.cos(angle) * distance;
+                const z = Math.sin(angle) * distance;
+                
+                // Dustbin base
+                const baseGeometry = new THREE.CylinderGeometry(0.8, 0.8, 0.2, 16);
+                const baseMaterial = new THREE.MeshStandardMaterial({ color: 0x333333 });
+                const base = new THREE.Mesh(baseGeometry, baseMaterial);
+                base.position.set(x, 0.1, z);
+                
+                // Dustbin body
+                const bodyGeometry = new THREE.CylinderGeometry(0.7, 0.8, 1, 16);
+                const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0x555555 });
+                const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+                body.position.set(x, 0.8, z);
+                
+                // Dustbin top
+                const topGeometry = new THREE.CylinderGeometry(0.75, 0.75, 0.1, 16);
+                const topMaterial = new THREE.MeshStandardMaterial({ color: 0x777777 });
+                const top = new THREE.Mesh(topGeometry, topMaterial);
+                top.position.set(x, 1.35, z);
+                
+                const dustbin = new THREE.Group();
+                dustbin.add(base, body, top);
+                dustbin.castShadow = true;
+                dustbin.receiveShadow = true;
+                scene.add(dustbin);
+                dustbins.push(dustbin);
+                
+                // Add collision
+                const dustbinBox = new THREE.Box3().setFromObject(dustbin);
+                obstacles.push(dustbinBox);
+                collisionObjects.push(dustbin);
+            }
+        }
+
+        // Create trees
+        function createTrees() {
+            const treeCount = 15;
+            
+            for (let i = 0; i < treeCount; i++) {
+                let x, z, attempts = 0;
+                do {
+                    const angle = Math.random() * Math.PI * 2;
+                    const distance = parkRadius * 0.8 * Math.random();
+                    
+                    x = Math.cos(angle) * distance;
+                    z = Math.sin(angle) * distance;
+                    attempts++;
+                } while ((!isValidPosition(x, z, []) || Math.sqrt(x*x + z*z) < 15) && attempts < 50);
+                
+                if (attempts < 50) {
+                    const tree = createTree(x, z);
+                    obstacles.push(new THREE.Box3().setFromObject(tree.trunk).expandByScalar(1.5));
+                    collisionObjects.push(tree.trunk);
+                }
+            }
+        }
+
+        function createTree(x, z) {
+            const trunkGeometry = new THREE.CylinderGeometry(0.3, 0.4, 2, 8);
+            const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+            const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+            trunk.position.set(x, 1, z);
+            trunk.castShadow = true;
+            trunk.receiveShadow = true;
+            
+            const leavesGeometry = new THREE.SphereGeometry(2, 8, 8);
+            const leavesMaterial = new THREE.MeshStandardMaterial({ color: 0x228B22 });
+            const leaves = new THREE.Mesh(leavesGeometry, leavesMaterial);
+            leaves.position.set(x, 3.5, z);
+            leaves.castShadow = true;
+            leaves.receiveShadow = true;
+            
+            scene.add(trunk, leaves);
+            return { trunk, leaves };
+        }
+
+        // Check if position is valid (10 units from any object)
+        function isValidPosition(x, z, objects, minDistance = 10) {
+            const testPos = new THREE.Vector3(x, 0, z);
+            
+            // Check park boundaries (circular now)
+            if (Math.sqrt(x*x + z*z) > parkRadius - 2) return false;
+            
+            for (const obj of objects) {
+                if (obj.position.distanceTo(testPos) < minDistance) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // NPC implementation
+        function createNPC(x, z, color) {
+            const npcGroup = new THREE.Group();
+            const npcColor = color || npcColors[Math.floor(Math.random() * npcColors.length)];
+            
+            // All parts same color
+            const headGeometry = new THREE.SphereGeometry(0.4, 8, 8);
+            const headMaterial = new THREE.MeshStandardMaterial({ color: npcColor });
+            const head = new THREE.Mesh(headGeometry, headMaterial);
+            head.position.set(0, 1.9, 0);
+            npcGroup.add(head);
+            
+            const torsoGeometry = new THREE.BoxGeometry(0.7, 0.9, 0.4);
+            const torsoMaterial = new THREE.MeshStandardMaterial({ color: npcColor });
+            const torso = new THREE.Mesh(torsoGeometry, torsoMaterial);
+            torso.position.set(0, 1.1, 0);
+            npcGroup.add(torso);
+            
+            const legGeometry = new THREE.BoxGeometry(0.25, 0.8, 0.25);
+            const legMaterial = new THREE.MeshStandardMaterial({ color: npcColor });
+            
+            const leftLeg = new THREE.Mesh(legGeometry, legMaterial);
+            leftLeg.position.set(-0.2, 0.4, 0);
+            npcGroup.add(leftLeg);
+            
+            const rightLeg = new THREE.Mesh(legGeometry, legMaterial);
+            rightLeg.position.set(0.2, 0.4, 0);
+            npcGroup.add(rightLeg);
+            
+            npcGroup.position.set(x, 0, z);
+            npcGroup.castShadow = true;
+            npcGroup.userData.isNPC = true;
+            npcGroup.userData.color = npcColor;
+            npcGroup.userData.state = "wandering"; // wandering, throwing, resting
+            npcGroup.userData.throwCount = 0;
+            npcGroup.userData.restPosition = null;
+            npcGroup.userData.restTimer = 0;
+            
+            scene.add(npcGroup);
+            
+            // NPC properties (slower speed)
+            npcGroup.speed = 0.01 + Math.random() * 0.01; // Reduced speed
+            npcGroup.targetPosition = new THREE.Vector3();
+            npcGroup.uncollectedProjectiles = 0;
+            npcGroup.maxUncollectedProjectiles = 1 + Math.floor(Math.random() * 2); // 1 or 2
+            
+            npcGroup.findNewTarget = function() {
+                for (let attempts = 0; attempts < 20; attempts++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const distance = 5 + Math.random() * 10;
+                    
+                    const newTarget = new THREE.Vector3(
+                        this.position.x + Math.sin(angle) * distance,
+                        0,
+                        this.position.z + Math.cos(angle) * distance
+                    );
+                    
+                    // Check park boundaries (circular)
+                    if (Math.sqrt(newTarget.x*newTarget.x + newTarget.z*newTarget.z) > parkRadius - 2) continue;
+                    
+                    // Check path with raycasting (excluding NPCs and dog)
+                    const direction = new THREE.Vector3().subVectors(newTarget, this.position).normalize();
+                    const ray = new THREE.Raycaster(this.position, direction, 0, distance);
+                    const intersects = ray.intersectObjects(collisionObjects);
+                    
+                    let pathClear = true;
+                    for (const intersect of intersects) {
+                        if (intersect.distance < distance) {
+                            pathClear = false;
+                            break;
+                        }
+                    }
+                    
+                    if (pathClear) {
+                        this.targetPosition.copy(newTarget);
+                        return true;
+                    }
+                }
+                return false;
+            };
+            
+            // Initialize first target
+            npcGroup.findNewTarget();
+            
+            // Add collision box
+            npcGroup.collisionBox = new THREE.Box3().setFromObject(npcGroup);
+            npcGroup.collisionBox.expandByScalar(0.5);
+            
+            return npcGroup;
+        }
+
+        // Adjust NPC count based on game state
+        function adjustNPCCount() {
+            const targetCount = minNPCs + Math.floor(Math.random() * (maxNPCs - minNPCs + 1));
+            
+            if (targetCount > currentNPCs) {
+                // Add NPCs
+                const toAdd = targetCount - currentNPCs;
+                const allObjects = [...collisionObjects, ...npcs];
+                
+                for (let i = 0; i < toAdd; i++) {
+                    let x, z, attempts = 0;
+                    do {
+                        const angle = Math.random() * Math.PI * 2;
+                        const distance = parkRadius * 0.7 * Math.random();
+                        
+                        x = Math.cos(angle) * distance;
+                        z = Math.sin(angle) * distance;
+                        attempts++;
+                    } while (!isValidPosition(x, z, allObjects) && attempts < 50);
+                    
+                    if (attempts < 50) {
+                        const npc = createNPC(x, z, npcColors[(currentNPCs + i) % npcColors.length]);
+                        npcs.push(npc);
+                        allObjects.push(npc);
+                    }
+                }
+            } else if (targetCount < currentNPCs) {
+                // Remove NPCs
+                const toRemove = currentNPCs - targetCount;
+                for (let i = 0; i < toRemove; i++) {
+                    if (npcs.length > 0) {
+                        const npc = npcs.pop();
+                        scene.remove(npc);
+                    }
+                }
+            }
+            
+            currentNPCs = targetCount;
+        }
+
+        // Dog character
+        function createDog() {
+            const dogGroup = new THREE.Group();
+            const scale = 0.7;
+            dogGroup.scale.set(scale, scale, scale);
+            
+            // Body parts
+            const bodyGeometry = new THREE.BoxGeometry(1.5, 0.8, 0.8);
+            const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xA0522D });
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            body.position.y = 0.8;
+            body.castShadow = true;
+            
+            const headGeometry = new THREE.SphereGeometry(0.5, 8, 8);
+            const headMaterial = new THREE.MeshStandardMaterial({ color: 0xA0522D });
+            const head = new THREE.Mesh(headGeometry, headMaterial);
+            head.position.set(0, 1.0, 0.8);
+            dogGroup.add(head);
+            
+            const legGeometry = new THREE.CylinderGeometry(0.1, 0.1, 0.5, 8);
+            const legMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+            
+            const legs = [
+                [-0.4, 0.25, 0.4],
+                [0.4, 0.25, 0.4],
+                [-0.4, 0.25, -0.4],
+                [0.4, 0.25, -0.4]
+            ].forEach(pos => {
+                const leg = new THREE.Mesh(legGeometry, legMaterial);
+                leg.position.set(...pos);
+                leg.rotation.x = Math.PI / 2;
+                leg.castShadow = true;
+                dogGroup.add(leg);
+            });
+            
+            const tailGeometry = new THREE.CylinderGeometry(0.05, 0.1, 0.6, 8);
+            const tail = new THREE.Mesh(tailGeometry, legMaterial);
+            tail.position.set(-0.8, 0.8, -0.4);
+            tail.rotation.z = Math.PI / 4;
+            tail.castShadow = true;
+            
+            dogGroup.add(body, head, tail);
+            dogGroup.position.set(0, 0, 0);
+            dogGroup.castShadow = true;
+            dogGroup.userData.isDog = true;
+            scene.add(dogGroup);
+            
+            // Dog properties (reduced speed by 50%)
+            dogGroup.speed = 0;
+            dogGroup.maxSpeed = 0.1;
+            dogGroup.acceleration = 0.02;
+            dogGroup.deceleration = 0.05;
+            dogGroup.rotationSpeed = 0.05;
+            dogGroup.direction = new THREE.Vector3(0, 0, 1);
+            dogGroup.velocity = new THREE.Vector3();
+            dogGroup.isJumping = false;
+            dogGroup.jumpHeight = 0;
+            dogGroup.jumpVelocity = 0;
+            dogGroup.collisionBox = new THREE.Box3().setFromObject(dogGroup);
+            
+            return dogGroup;
+        }
+
+        // Spawn initial NPCs
+        function spawnInitialNPCs() {
+            const allObjects = [...collisionObjects];
+            
+            for (let i = 0; i < currentNPCs; i++) {
+                let x, z, attempts = 0;
+                do {
+                    const angle = Math.random() * Math.PI * 2;
+                    const distance = parkRadius * 0.7 * Math.random();
+                    
+                    x = Math.cos(angle) * distance;
+                    z = Math.sin(angle) * distance;
+                    attempts++;
+                } while (!isValidPosition(x, z, allObjects) && attempts < 50);
+                
+                if (attempts < 50) {
+                    const npc = createNPC(x, z, npcColors[i % npcColors.length]);
+                    npcs.push(npc);
+                    allObjects.push(npc);
+                }
+            }
+        }
+
+        // Spawn dog
+        function spawnDog() {
+            const allObjects = [...collisionObjects, ...npcs];
+            let x = 0, z = 0, attempts = 0;
+            
+            do {
+                x = Math.random() * 20 - 10;
+                z = Math.random() * 20 - 10;
+                attempts++;
+            } while (!isValidPosition(x, z, allObjects) && attempts < 50);
+            
+            dog = createDog();
+            dog.position.set(x, 0, z);
+            
+            // Game is ready
+            gameLoaded = true;
+            loadingText.style.display = 'none';
+        }
+
+        // Initialize game in sequence
+        function initGame() {
+            // 1. Create park environment
+            createPark();
+            createFlowerPatches();
+            createDustbins();
+            createTrees();
+            
+            // 2. Spawn NPCs after 1 second
+            setTimeout(() => {
+                spawnInitialNPCs();
+                
+                // 3. Spawn dog after NPCs are placed
+                spawnDog();
+                
+                // 4. Start adjusting NPC count periodically
+                setInterval(adjustNPCCount, 30000); // Adjust every 30 seconds
+            }, 1000);
+        }
+
+        // Collision detection (excluding NPCs and dog)
+        function checkCollision(objectBox) {
+            if (!parkBoundary.containsBox(objectBox)) return true;
+            
+            // Check circular boundary
+            const center = objectBox.getCenter(new THREE.Vector3());
+            if (Math.sqrt(center.x*center.x + center.z*center.z) > parkRadius - 1) return true;
+            
+            for (const obstacle of obstacles) {
+                if (obstacle.intersectsBox(objectBox)) return true;
+            }
+            return false;
+        }
+
+        // Create projectile (simplified to normal sphere)
+        function createProjectile(position, direction, color) {
+            const geometry = new THREE.SphereGeometry(0.3, 16, 16);
+            const material = new THREE.MeshStandardMaterial({ 
+                color: color,
+                roughness: 0.8,
+                metalness: 0.1
+            });
+            
+            const projectile = new THREE.Mesh(geometry, material);
+            projectile.position.copy(position);
+            projectile.userData.color = color;
+            
+            // Parabolic motion properties
+            projectile.velocity = direction.clone().normalize().multiplyScalar(0.1);
+            projectile.velocity.y = 0.2;
+            projectile.gravity = -0.02;
+            projectile.stuck = false;
+            projectile.collected = false;
+            
+            scene.add(projectile);
+            projectiles.push(projectile);
+            return projectile;
+        }
+
+        // Show score popup at position
+        function showScorePopup(score, position) {
+            const popup = document.createElement('div');
+            popup.className = 'score-popup';
+            popup.textContent = `+${score}`;
+            
+            // Convert 3D position to screen coordinates
+            const vector = position.clone().project(camera);
+            vector.x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+            vector.y = (-(vector.y * 0.5) + 0.5) * window.innerHeight;
+            
+            popup.style.left = `${vector.x}px`;
+            popup.style.top = `${vector.y}px`;
+            document.body.appendChild(popup);
+            
+            // Remove after animation completes
+            setTimeout(() => {
+                popup.remove();
+            }, 1000);
+        }
+
+        // Check for projectile collection
+        function checkProjectileCollection() {
+            const dogBox = dog.collisionBox;
+            
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const p = projectiles[i];
+                const pBox = new THREE.Box3().setFromObject(p);
+                
+                if (dogBox.intersectsBox(pBox) && !p.collected) {
+                    // Check if dog can carry more items
+                    if (withDogCount >= maxWithDog) {
+                        continue;
+                    }
+                    
+                    p.collected = true;
+                    scene.remove(p);
+                    projectiles.splice(i, 1);
+                    
+                    // Add to carried projectiles
+                    carriedProjectiles.push(p);
+                    withDogCount++;
+                    withDogElement.textContent = `With Dog: ${withDogCount}/${maxWithDog}`;
+                    
+                    // Update color counts
+                    colorCounts[p.userData.color]++;
+                    updateColorCounts();
+                    
+                    // Decrement uncollected count for the owner NPC if it exists
+                    if (p.owner && p.owner.uncollectedProjectiles > 0) {
+                        p.owner.uncollectedProjectiles--;
+                    }
+                }
+            }
+        }
+
+        // Return projectiles to owners
+        function returnProjectilesToOwners() {
+            if (withDogCount === 0) return;
+            
+            // Find closest NPC for each carried projectile
+            for (let i = carriedProjectiles.length - 1; i >= 0; i--) {
+                const projectile = carriedProjectiles[i];
+                let closestNPC = null;
+                let closestDistance = Infinity;
+                
+                for (const npc of npcs) {
+                    if (npc.userData.color === projectile.userData.color) {
+                        const distance = npc.position.distanceTo(dog.position);
+                        if (distance < closestDistance) {
+                            closestDistance = distance;
+                            closestNPC = npc;
+                        }
+                    }
+                }
+                
+                if (closestNPC && closestDistance < 5) {
+                    // Return successful - add points
+                    score += 5;
+                    scoreElement.textContent = `Score: ${score}`;
+                    showScorePopup(5, dog.position);
+                    
+                    // Remove from carried projectiles
+                    carriedProjectiles.splice(i, 1);
+                    withDogCount--;
+                    withDogElement.textContent = `With Dog: ${withDogCount}/${maxWithDog}`;
+                    
+                    // Update color counts
+                    colorCounts[projectile.userData.color]--;
+                    updateColorCounts();
+                    
+                    // Wake up NPC if it was resting
+                    if (closestNPC.userData.state === "resting") {
+                        closestNPC.userData.state = "wandering";
+                        closestNPC.userData.restTimer = 0;
+                        closestNPC.findNewTarget();
+                    }
+                }
+            }
+        }
+
+        // Input handling
+        const keys = {
+            w: false, a: false, s: false, d: false, ' ': false,
+            e: false // Added for returning items
+        };
+        
+        window.addEventListener('keydown', (event) => {
+            if (!gameLoaded) return;
+            const key = event.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) keys[key] = true;
+            
+            // Return items when 'E' is pressed
+            if (key === 'e') {
+                returnProjectilesToOwners();
+            }
+        });
+        
+        window.addEventListener('keyup', (event) => {
+            if (!gameLoaded) return;
+            const key = event.key.toLowerCase();
+            if (keys.hasOwnProperty(key)) keys[key] = false;
+        });
+
+        // Animation loop
+        let lastTime = 0;
+        function animate(time) {
+            requestAnimationFrame(animate);
+            const deltaTime = time - lastTime;
+            lastTime = time;
+            
+            if (!gameLoaded) return;
+            
+            // Dog movement
+            if (keys.w) dog.speed = Math.min(dog.speed + dog.acceleration, dog.maxSpeed);
+            else if (keys.s) dog.speed = Math.max(dog.speed - dog.acceleration, -dog.maxSpeed * 0.5);
+            else {
+                if (dog.speed > 0) dog.speed = Math.max(dog.speed - dog.deceleration, 0);
+                else if (dog.speed < 0) dog.speed = Math.min(dog.speed + dog.deceleration, 0);
+            }
+            
+            if (keys.a) {
+                dog.rotation.y += dog.rotationSpeed;
+                dog.direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), dog.rotationSpeed);
+            }
+            if (keys.d) {
+                dog.rotation.y -= dog.rotationSpeed;
+                dog.direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), -dog.rotationSpeed);
+            }
+            
+            // Jumping with increased height and gravity
+            if (keys[' '] && !dog.isJumping) {
+                dog.isJumping = true;
+                dog.jumpVelocity = 0.25;
+            }
+            
+            if (dog.isJumping) {
+                dog.jumpVelocity -= 0.02;
+                dog.jumpHeight += dog.jumpVelocity;
+                if (dog.jumpHeight <= 0) {
+                    dog.jumpHeight = 0;
+                    dog.isJumping = false;
+                    dog.jumpVelocity = 0;
+                }
+            }
+            
+            dog.velocity.copy(dog.direction).multiplyScalar(dog.speed);
+            const oldPosition = dog.position.clone();
+            dog.position.add(dog.velocity);
+            dog.position.y = dog.jumpHeight;
+            dog.collisionBox.setFromObject(dog);
+            
+            if (checkCollision(dog.collisionBox)) {
+                dog.position.copy(oldPosition);
+                dog.speed = 0;
+                dog.collisionBox.setFromObject(dog);
+            }
+            
+            // NPC movement and behavior
+            for (const npc of npcs) {
+                // Update collision box
+                npc.collisionBox.setFromObject(npc);
+                
+                if (npc.userData.state === "wandering") {
+                    // Movement
+                    if (npc.targetPosition) {
+                        const direction = new THREE.Vector3().subVectors(npc.targetPosition, npc.position).normalize();
+                        const distance = npc.position.distanceTo(npc.targetPosition);
+                        
+                        if (distance > 0.5) {
+                            const oldPos = npc.position.clone();
+                            npc.position.add(direction.multiplyScalar(Math.min(npc.speed, distance)));
+                            npc.rotation.y = Math.atan2(-direction.x, -direction.z);
+                            
+                            // Check for collisions (only with environment)
+                            if (checkCollision(npc.collisionBox)) {
+                                npc.position.copy(oldPos);
+                                npc.findNewTarget();
+                            }
+                        } else {
+                            npc.findNewTarget();
+                        }
+                    }
+                    
+                    // Random chance to throw projectile each frame if below limit
+                    if (npc.uncollectedProjectiles < npc.maxUncollectedProjectiles && Math.random() < 0.003) {
+                        const toDog = new THREE.Vector3().subVectors(dog.position, npc.position).normalize();
+                        const projectile = createProjectile(
+                            npc.position.clone().add(new THREE.Vector3(0, 1.5, 0)), 
+                            toDog, 
+                            npc.userData.color
+                        );
+                        projectile.owner = npc;
+                        npc.uncollectedProjectiles++;
+                        npc.userData.throwCount++;
+                        
+                        // After throwing twice, find a rest spot
+                        if (npc.userData.throwCount >= 2) {
+                            npc.userData.state = "seekingRest";
+                            npc.userData.throwCount = 0;
+                            
+                            // Find a rest position
+                            for (let attempts = 0; attempts < 20; attempts++) {
+                                const angle = Math.random() * Math.PI * 2;
+                                const distance = 5 + Math.random() * 10;
+                                
+                                const restPos = new THREE.Vector3(
+                                    npc.position.x + Math.sin(angle) * distance,
+                                    0,
+                                    npc.position.z + Math.cos(angle) * distance
+                                );
+                                
+                                // Check park boundaries
+                                if (Math.sqrt(restPos.x*restPos.x + restPos.z*restPos.z) > parkRadius - 2) continue;
+                                
+                                // Check path with raycasting
+                                const direction = new THREE.Vector3().subVectors(restPos, npc.position).normalize();
+                                const ray = new THREE.Raycaster(npc.position, direction, 0, distance);
+                                const intersects = ray.intersectObjects(collisionObjects);
+                                
+                                let pathClear = true;
+                                for (const intersect of intersects) {
+                                    if (intersect.distance < distance) {
+                                        pathClear = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if (pathClear) {
+                                    npc.userData.restPosition = restPos;
+                                    npc.targetPosition.copy(restPos);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } 
+                else if (npc.userData.state === "seekingRest") {
+                    // Move to rest position
+                    if (npc.userData.restPosition) {
+                        const direction = new THREE.Vector3().subVectors(npc.userData.restPosition, npc.position).normalize();
+                        const distance = npc.position.distanceTo(npc.userData.restPosition);
+                        
+                        if (distance > 0.5) {
+                            const oldPos = npc.position.clone();
+                            npc.position.add(direction.multiplyScalar(Math.min(npc.speed, distance)));
+                            npc.rotation.y = Math.atan2(-direction.x, -direction.z);
+                            
+                            if (checkCollision(npc.collisionBox)) {
+                                npc.position.copy(oldPos);
+                                npc.userData.state = "wandering";
+                                npc.findNewTarget();
+                            }
+                        } else {
+                            // Reached rest position
+                            npc.userData.state = "resting";
+                            npc.userData.restTimer = 5000 + Math.random() * 10000; // 5-15 seconds
+                        }
+                    } else {
+                        npc.userData.state = "wandering";
+                        npc.findNewTarget();
+                    }
+                }
+                else if (npc.userData.state === "resting") {
+                    // Count down rest timer
+                    npc.userData.restTimer -= deltaTime;
+                    if (npc.userData.restTimer <= 0) {
+                        npc.userData.state = "wandering";
+                        npc.findNewTarget();
+                    }
+                }
+            }
+            
+            // Update projectiles with parabolic motion
+            for (let i = projectiles.length - 1; i >= 0; i--) {
+                const p = projectiles[i];
+                
+                if (!p.stuck) {
+                    // Apply gravity
+                    p.velocity.y += p.gravity;
+                    
+                    // Update position
+                    p.position.x += p.velocity.x;
+                    p.position.y += p.velocity.y;
+                    p.position.z += p.velocity.z;
+                    
+                    // Check if projectile hit the ground
+                    if (p.position.y <= 0.2) {
+                        p.position.y = 0.2;
+                        p.stuck = true;
+                    }
+                }
+            }
+            
+            // Check for projectile collection
+            checkProjectileCollection();
+            
+            updateCameraPosition();
+            renderer.render(scene, camera);
+        }
+        
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Start the game
+        initGame();
+        animate();
+    </script>
+</body>
+</html>
